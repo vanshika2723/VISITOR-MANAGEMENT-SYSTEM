@@ -11,10 +11,12 @@ const jwt = require("jsonwebtoken");
 require("dotenv").config();
 
 const connectDB = require("./config/db");
+
 const {
   notFound,
   errorHandler,
 } = require("./middleware/errorMiddleware");
+
 const User = require("./models/User");
 
 // Import Routes
@@ -36,18 +38,31 @@ const analyticsRoutes = require("./routes/analyticsRoutes");
 const startAppointmentReminderService = require("./services/appointmentReminderService");
 const transporter = require("./config/emailConfig");
 
-// Socket utility
 const { setIO } = require("./utils/socket");
+
+// ===============================
+// EXPRESS APP
+// ===============================
 
 const app = express();
 const server = http.createServer(app);
 
 // ===============================
+// ALLOWED FRONTEND ORIGINS
+// ===============================
+
+const allowedOrigins = [
+  "http://localhost:5173",
+  "https://visitor-management-system-zya4.vercel.app",
+];
+
+// ===============================
 // SOCKET.IO CONFIGURATION
 // ===============================
+
 const io = new Server(server, {
   cors: {
-    origin: process.env.CLIENT_URL || "http://localhost:5173",
+    origin: allowedOrigins,
     methods: ["GET", "POST"],
     credentials: true,
   },
@@ -59,6 +74,7 @@ setIO(io);
 // ===============================
 // SOCKET AUTHENTICATION
 // ===============================
+
 io.use(async (socket, next) => {
   try {
     const token =
@@ -77,7 +93,9 @@ io.use(async (socket, next) => {
       return next(new Error("Invalid authentication token"));
     }
 
-    const user = await User.findById(userId).select("_id name role isActive");
+    const user = await User.findById(userId).select(
+      "_id name role isActive"
+    );
 
     if (!user || !user.isActive) {
       return next(new Error("User is not authorized"));
@@ -93,10 +111,10 @@ io.use(async (socket, next) => {
 // ===============================
 // SOCKET CONNECTION
 // ===============================
+
 io.on("connection", (socket) => {
   const userId = socket.user._id.toString();
 
-  // Private room for each user
   socket.join(`user:${userId}`);
 
   console.log(`Socket connected: ${socket.user.name}`);
@@ -109,6 +127,7 @@ io.on("connection", (socket) => {
 // ===============================
 // EMAIL VERIFICATION
 // ===============================
+
 transporter.verify((error) => {
   if (error) {
     console.log("SMTP Connection Failed:", error.message);
@@ -120,6 +139,7 @@ transporter.verify((error) => {
 // ===============================
 // SECURITY MIDDLEWARE
 // ===============================
+
 app.use(
   helmet({
     crossOriginResourcePolicy: {
@@ -132,36 +152,46 @@ app.use(
 // CORS CONFIGURATION
 // ===============================
 
-const cors = require("cors");
-
-const allowedOrigins = [
-  "http://localhost:5173",
-  "https://visitor-management-system-zya4.vercel.app"
-];
-
-app.use(cors({
+const corsOptions = {
   origin: function (origin, callback) {
     if (!origin || allowedOrigins.includes(origin)) {
       callback(null, true);
     } else {
+      console.log("Blocked CORS Origin:", origin);
       callback(new Error("Not allowed by CORS"));
     }
   },
-  credentials: true,
-  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"]
-}));
 
+  credentials: true,
+
+  methods: [
+    "GET",
+    "POST",
+    "PUT",
+    "PATCH",
+    "DELETE",
+    "OPTIONS",
+  ],
+
+  allowedHeaders: [
+    "Content-Type",
+    "Authorization",
+  ],
+};
+
+app.use(cors(corsOptions));
 
 // ===============================
 // BODY PARSER
 // ===============================
+
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
 
 // ===============================
 // STATIC UPLOADS
 // ===============================
+
 app.use(
   "/uploads",
   express.static(path.join(__dirname, "uploads"))
@@ -170,6 +200,7 @@ app.use(
 // ===============================
 // ROOT API
 // ===============================
+
 app.get("/", (req, res) => {
   res.status(200).json({
     success: true,
@@ -180,18 +211,22 @@ app.get("/", (req, res) => {
 // ===============================
 // HEALTH CHECK
 // ===============================
+
 app.get("/api/health", (req, res) => {
   const isDatabaseConnected =
     mongoose.connection.readyState === 1;
 
   res.status(isDatabaseConnected ? 200 : 503).json({
     success: isDatabaseConnected,
+
     message: isDatabaseConnected
       ? "Server and database are healthy"
       : "Database is not connected",
+
     database: isDatabaseConnected
       ? "Connected"
       : "Disconnected",
+
     timestamp: new Date().toISOString(),
   });
 });
@@ -199,6 +234,7 @@ app.get("/api/health", (req, res) => {
 // ===============================
 // API ROUTES
 // ===============================
+
 app.use("/api/auth", authRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/visitors", visitorRoutes);
@@ -217,15 +253,19 @@ app.use("/api/analytics", analyticsRoutes);
 // ===============================
 // 404 HANDLER
 // ===============================
+
 app.use(notFound);
 
-
+// ===============================
+// GLOBAL ERROR HANDLER
+// ===============================
 
 app.use(errorHandler);
 
 // ===============================
 // START SERVER
 // ===============================
+
 const startServer = async () => {
   try {
     await connectDB();
@@ -237,13 +277,17 @@ const startServer = async () => {
     server.listen(PORT, () => {
       console.log("--------------------------------");
       console.log("VISITOR MANAGEMENT SYSTEM");
-      console.log(`Server: http://localhost:${PORT}`);
-      console.log(`Health: http://localhost:${PORT}/api/health`);
+      console.log(`Server running on port ${PORT}`);
+      console.log(`Health: /api/health`);
       console.log("Socket.IO: Enabled");
       console.log("--------------------------------");
     });
   } catch (error) {
-    console.error("Application startup failed:", error.message);
+    console.error(
+      "Application startup failed:",
+      error.message
+    );
+
     process.exit(1);
   }
 };
