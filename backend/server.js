@@ -54,7 +54,21 @@ const server = http.createServer(app);
 const allowedOrigins = [
   "http://localhost:5173",
   "https://visitor-management-system-zya4.vercel.app",
+  "https://visitor-management-system-moe1043zm.vercel.app",
 ];
+
+// Allow official Vercel preview deployments
+const isAllowedOrigin = (origin) => {
+  if (!origin) return true;
+
+  if (allowedOrigins.includes(origin)) {
+    return true;
+  }
+
+  return /^https:\/\/visitor-management-system-[a-z0-9-]+\.vercel\.app$/.test(
+    origin
+  );
+};
 
 // ===============================
 // SOCKET.IO CONFIGURATION
@@ -62,13 +76,19 @@ const allowedOrigins = [
 
 const io = new Server(server, {
   cors: {
-    origin: allowedOrigins,
+    origin: (origin, callback) => {
+      if (isAllowedOrigin(origin)) {
+        callback(null, true);
+      } else {
+        console.log("Blocked Socket.IO Origin:", origin);
+        callback(new Error("Not allowed by Socket.IO CORS"));
+      }
+    },
     methods: ["GET", "POST"],
     credentials: true,
   },
 });
 
-// Make Socket.IO available to notification utility
 setIO(io);
 
 // ===============================
@@ -79,7 +99,10 @@ io.use(async (socket, next) => {
   try {
     const token =
       socket.handshake.auth?.token ||
-      socket.handshake.headers?.authorization?.replace("Bearer ", "");
+      socket.handshake.headers?.authorization?.replace(
+        "Bearer ",
+        ""
+      );
 
     if (!token) {
       return next(new Error("Authentication token required"));
@@ -153,8 +176,8 @@ app.use(
 // ===============================
 
 const corsOptions = {
-  origin: function (origin, callback) {
-    if (!origin || allowedOrigins.includes(origin)) {
+  origin: (origin, callback) => {
+    if (isAllowedOrigin(origin)) {
       callback(null, true);
     } else {
       console.log("Blocked CORS Origin:", origin);
@@ -278,7 +301,7 @@ const startServer = async () => {
       console.log("--------------------------------");
       console.log("VISITOR MANAGEMENT SYSTEM");
       console.log(`Server running on port ${PORT}`);
-      console.log(`Health: /api/health`);
+      console.log("Health: /api/health");
       console.log("Socket.IO: Enabled");
       console.log("--------------------------------");
     });
