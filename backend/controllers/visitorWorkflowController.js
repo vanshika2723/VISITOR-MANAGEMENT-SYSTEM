@@ -260,6 +260,7 @@ const rejectVisitor = async (req, res, next) => {
 };
 
 // ATOMIC CHECK-IN VISITOR
+
 const checkInVisitor = async (req, res, next) => {
   try {
     const visitor = await Visitor.findById(req.params.id);
@@ -295,24 +296,24 @@ const checkInVisitor = async (req, res, next) => {
       });
     }
 
-    // Check appointment-based pass expiry
-// Check appointment-based pass expiry
-const settings = await Setting.findOne();
-const expiryHours = settings?.visitorPassExpiryHours ?? 12;
+    // Check appointment pass expiry
+    const settings = await Setting.findOne();
+    const expiryHours = settings?.visitorPassExpiryHours ?? 12;
 
-if (visitor.appointmentDate) {
-  const expiryTime =
-    new Date(visitor.appointmentDate).getTime() +
-    expiryHours * 60 * 60 * 1000;
+    if (visitor.appointmentDate) {
+      const expiryTime =
+        new Date(visitor.appointmentDate).getTime() +
+        expiryHours * 60 * 60 * 1000;
 
-  if (Date.now() > expiryTime) {
-    return res.status(403).json({
-      success: false,
-      message: "Visitor pass has expired. Please register a new visit.",
-    });
-  }
-}
-    // Atomic update: only one request can change registered to checked-in
+      if (Date.now() > expiryTime) {
+        return res.status(403).json({
+          success: false,
+          message: "Visitor pass has expired. Please register a new visit.",
+        });
+      }
+    }
+
+    // Atomic update
     const updatedVisitor = await Visitor.findOneAndUpdate(
       {
         _id: visitor._id,
@@ -348,25 +349,42 @@ if (visitor.appointmentDate) {
       });
     }
 
- 
-    await createNotification({
-      recipient: updatedVisitor.host,
-      title: "Visitor Checked In",
-      message: `${updatedVisitor.name} has arrived at the office.`,
-      type: "visitor_checkin",
-      visitor: updatedVisitor._id,
-      actionUrl: `/visitors/${updatedVisitor._id}`,
-    });
+    console.log("Visitor checked in:", updatedVisitor.visitorId);
 
-// Send visitor arrival email to host
-try {
-  const host = await User.findById(updatedVisitor.host).select("name email");
+    // Host notification in background
+    Promise.resolve()
+      .then(() =>
+        createNotification({
+          recipient: updatedVisitor.host,
+          title: "Visitor Checked In",
+          message: `${updatedVisitor.name} has arrived at the office.`,
+          type: "visitor_checkin",
+          visitor: updatedVisitor._id,
+          actionUrl: `/visitors/${updatedVisitor._id}`,
+        })
+      )
+      .catch((error) => {
+        console.error("Check-in notification failed:", error.message);
+      });
 
-  if (host?.email) {
-    await sendEmail({
-      to: host.email,
-      subject: `Visitor Arrived - ${updatedVisitor.visitorId}`,
-      text: `
+    // Host arrival email in background
+    Promise.resolve()
+      .then(async () => {
+        const host = await User.findById(updatedVisitor.host)
+          .select("name email");
+
+        if (!host?.email) return;
+
+        const checkInTime = new Date(
+          updatedVisitor.checkInTime
+        ).toLocaleString("en-IN", {
+          timeZone: "Asia/Kolkata",
+        });
+
+        await sendEmail({
+          to: host.email,
+          subject: `Visitor Arrived - ${updatedVisitor.visitorId}`,
+          text: `
 Hello ${host.name},
 
 Your visitor has arrived at the office.
@@ -375,83 +393,96 @@ Visitor Name: ${updatedVisitor.name}
 Visitor ID: ${updatedVisitor.visitorId}
 Company: ${updatedVisitor.company || "N/A"}
 Purpose: ${updatedVisitor.purpose}
-Check-in Time: ${new Date(updatedVisitor.checkInTime).toLocaleString(
-  "en-IN",
-  { timeZone: "Asia/Kolkata" }
-)}
-
-Please coordinate with reception if required.
+Check-in Time: ${checkInTime}
 
 Regards,
 VisitPro Team
-      `,
-      html: `
-        <div style="font-family:Arial,sans-serif;padding:24px;color:#333">
-          <h2 style="color:#f47721">VisitPro - Visitor Arrival</h2>
-          <p>Hello ${host.name},</p>
-          <p>Your visitor has arrived at the office.</p>
-          <p><strong>Visitor Name:</strong> ${updatedVisitor.name}</p>
-          <p><strong>Visitor ID:</strong> ${updatedVisitor.visitorId}</p>
-          <p><strong>Company:</strong> ${updatedVisitor.company || "N/A"}</p>
-          <p><strong>Purpose:</strong> ${updatedVisitor.purpose}</p>
-          <p><strong>Check-in Time:</strong> ${new Date(
-            updatedVisitor.checkInTime
-          ).toLocaleString("en-IN", {
-            timeZone: "Asia/Kolkata",
-          })}</p>
-          <p>Regards,<br/>VisitPro Team</p>
-        </div>
-      `,
-    });
+          `,
+          html: `
+            <div style="font-family:Arial,sans-serif;padding:24px;color:#333">
+              <h2 style="color:#f47721">VisitPro - Visitor Arrival</h2>
+              <p>Hello ${host.name},</p>
+              <p>Your visitor has arrived at the office.</p>
+              <p><strong>Visitor Name:</strong> ${updatedVisitor.name}</p>
+              <p><strong>Visitor ID:</strong> ${updatedVisitor.visitorId}</p>
+              <p><strong>Company:</strong> ${updatedVisitor.company || "N/A"}</p>
+              <p><strong>Purpose:</strong> ${updatedVisitor.purpose}</p>
+              <p><strong>Check-in Time:</strong> ${checkInTime}</p>
+              <p>Regards,<br/>VisitPro Team</p>
+            </div>
+          `,
+        });
 
-    console.log("Visitor arrival email sent to host.");
-  }
-} catch (emailError) {
-  console.error("Host arrival email failed:", emailError.message);
-}
-// REAL-TIME DASHBOARD UPDATE
-emitVisitorUpdate({
-  action: "visitor_checked_in",
-  timestamp: new Date(),
-});
-    await logActivity({
-      req,
-      action: "VISITOR_CHECKED_IN",
-      description: `${updatedVisitor.name} checked in.`,
-      visitor: updatedVisitor._id,
-    });
-// Send check-in email to visitor
-if (updatedVisitor.email) {
-  try {
-    await sendEmail({
-      to: updatedVisitor.email,
-      subject: `Check-in Confirmed - ${updatedVisitor.visitorId}`,
-      html: `
-        <div style="font-family:Arial,sans-serif;padding:24px;color:#333">
-          <h2 style="color:#e87524">VisitPro - Check-in Confirmed</h2>
-          <p>Hello ${updatedVisitor.name},</p>
-          <p>Your check-in has been recorded successfully.</p>
-          <p><strong>Visitor ID:</strong> ${updatedVisitor.visitorId}</p>
-          <p><strong>Check-in time:</strong> ${new Date(
-            updatedVisitor.checkInTime
-          ).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })}</p>
-          <p>Please contact reception if you need assistance.</p>
-          <p>Regards,<br/>VisitPro Team</p>
-        </div>
-      `,
-    });
+        console.log("Host arrival email sent.");
+      })
+      .catch((error) => {
+        console.error("Host arrival email failed:", error.message);
+      });
 
-    console.log("Visitor check-in email sent!");
-  } catch (emailError) {
-    console.error("Check-in email failed:", emailError.message);
-  }
-}
+    // Visitor check-in email in background
+    if (updatedVisitor.email) {
+      Promise.resolve()
+        .then(() =>
+          sendEmail({
+            to: updatedVisitor.email,
+            subject: `Check-in Confirmed - ${updatedVisitor.visitorId}`,
+            html: `
+              <div style="font-family:Arial,sans-serif;padding:24px;color:#333">
+                <h2 style="color:#e87524">VisitPro - Check-in Confirmed</h2>
+                <p>Hello ${updatedVisitor.name},</p>
+                <p>Your check-in has been recorded successfully.</p>
+                <p><strong>Visitor ID:</strong> ${updatedVisitor.visitorId}</p>
+                <p><strong>Check-in time:</strong> ${new Date(
+                  updatedVisitor.checkInTime
+                ).toLocaleString("en-IN", {
+                  timeZone: "Asia/Kolkata",
+                })}</p>
+                <p>Regards,<br/>VisitPro Team</p>
+              </div>
+            `,
+          })
+        )
+        .then(() => console.log("Visitor check-in email sent."))
+        .catch((error) => {
+          console.error("Visitor check-in email failed:", error.message);
+        });
+    }
+
+    // Real-time dashboard update
+    try {
+      emitVisitorUpdate({
+        action: "visitor_checked_in",
+        visitorId: updatedVisitor._id,
+        visitorName: updatedVisitor.name,
+        timestamp: new Date(),
+      });
+    } catch (error) {
+      console.error("Check-in socket update failed:", error.message);
+    }
+
+    // Activity logging in background
+    Promise.resolve()
+      .then(() =>
+        logActivity({
+          req,
+          action: "VISITOR_CHECKED_IN",
+          description: `${updatedVisitor.name} checked in.`,
+          visitor: updatedVisitor._id,
+        })
+      )
+      .catch((error) => {
+        console.error("Check-in activity log failed:", error.message);
+      });
+
+    // Return success immediately
     return res.status(200).json({
       success: true,
       message: "Visitor checked in successfully.",
       visitor: updatedVisitor,
     });
+
   } catch (error) {
+    console.error("Check-in error:", error);
     next(error);
   }
 };
