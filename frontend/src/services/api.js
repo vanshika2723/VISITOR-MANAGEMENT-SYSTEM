@@ -28,10 +28,15 @@ api.interceptors.request.use(
 // Handle expired or invalid login sessions
 api.interceptors.response.use(
   (response) => response,
+
 (error) => {
-  console.error("API ERROR URL:", error.config?.url);
-  console.error("API ERROR STATUS:", error.response?.status);
-  console.error("API ERROR DATA:", error.response?.data);
+  console.error("========== API ERROR ==========");
+  console.error("URL:", error.config?.baseURL + error.config?.url);
+  console.error("METHOD:", error.config?.method);
+  console.error("STATUS:", error.response?.status);
+  console.error("RESPONSE:", error.response?.data);
+  console.error("ERROR CODE:", error.code);
+  console.error("ERROR MESSAGE:", error.message);
 
   if (error.response?.status === 401) {
     sessionStorage.removeItem("visitor_token");
@@ -44,6 +49,7 @@ api.interceptors.response.use(
 
   return Promise.reject(error);
 }
+
 );
 
 export default api;

@@ -446,8 +446,37 @@ if (updatedVisitor.email) {
 };
 
 // CHECK-OUT VISITOR
+
 const checkOutVisitor = async (req, res, next) => {
   try {
+    const visitor = await Visitor.findById(req.params.id);
+
+    if (!visitor) {
+      return res.status(404).json({
+        success: false,
+        message: "Visitor not found.",
+      });
+    }
+
+    // Already checked out
+    if (visitor.visitStatus === "checked-out") {
+      return res.status(409).json({
+        success: false,
+        message: "Visitor has already checked out.",
+        currentStatus: visitor.visitStatus,
+      });
+    }
+
+    // Visitor must be checked in first
+    if (visitor.visitStatus !== "checked-in") {
+      return res.status(409).json({
+        success: false,
+        message: "Visitor must be checked in before checkout.",
+        currentStatus: visitor.visitStatus,
+      });
+    }
+
+    // Atomic checkout update
     const updatedVisitor = await Visitor.findOneAndUpdate(
       {
         _id: req.params.id,
@@ -466,22 +495,13 @@ const checkOutVisitor = async (req, res, next) => {
     );
 
     if (!updatedVisitor) {
-      const visitor = await Visitor.findById(req.params.id);
-
-      if (!visitor) {
-        return res.status(404).json({
-          success: false,
-          message: "Visitor not found.",
-        });
-      }
-
       return res.status(409).json({
         success: false,
-        message: "Only checked-in visitors can be checked out.",
+        message: "Visitor status changed. Please refresh and try again.",
       });
     }
 
-    
+    // Notification
     await createNotification({
       recipient: updatedVisitor.host,
       title: "Visitor Checked Out",
@@ -490,52 +510,71 @@ const checkOutVisitor = async (req, res, next) => {
       visitor: updatedVisitor._id,
       actionUrl: `/visitors/${updatedVisitor._id}`,
     });
-// REAL-TIME DASHBOARD UPDATE
-emitVisitorUpdate({
-  action: "visitor_checked_out",
-  timestamp: new Date(),
-});
+
+    // Real-time update
+    emitVisitorUpdate({
+      action: "visitor_checked_out",
+      timestamp: new Date(),
+    });
+
+    // Activity log
     await logActivity({
       req,
       action: "VISITOR_CHECKED_OUT",
       description: `${updatedVisitor.name} checked out.`,
       visitor: updatedVisitor._id,
     });
-// Send check-out email to visitor
-if (updatedVisitor.email) {
-  try {
-    await sendEmail({
-      to: updatedVisitor.email,
-      subject: `Check-out Confirmed - ${updatedVisitor.visitorId}`,
-      html: `
-        <div style="font-family:Arial,sans-serif;padding:24px;color:#333">
-          <h2 style="color:#e87524">VisitPro - Check-out Confirmed</h2>
-          <p>Hello ${updatedVisitor.name},</p>
-          <p>Your check-out has been recorded successfully.</p>
-          <p><strong>Visitor ID:</strong> ${updatedVisitor.visitorId}</p>
-          <p><strong>Check-out time:</strong> ${new Date(
-            updatedVisitor.checkOutTime
-          ).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })}</p>
-          <p>Thank you for visiting us!</p>
-          <p>Regards,<br/>VisitPro Team</p>
-        </div>
-      `,
-    });
 
-    console.log("Visitor check-out email sent!");
-  } catch (emailError) {
-    console.error("Check-out email failed:", emailError.message);
-  }
-}
+    // Send checkout email
+    if (updatedVisitor.email) {
+      try {
+        await sendEmail({
+          to: updatedVisitor.email,
+          subject: `Check-out Confirmed - ${updatedVisitor.visitorId}`,
+          html: `
+            <div style="font-family:Arial,sans-serif;padding:24px;color:#333">
+              <h2 style="color:#e87524">
+                VisitPro - Check-out Confirmed
+              </h2>
+              <p>Hello ${updatedVisitor.name},</p>
+              <p>Your check-out has been recorded successfully.</p>
+              <p>
+                <strong>Visitor ID:</strong>
+                ${updatedVisitor.visitorId}
+              </p>
+              <p>
+                <strong>Check-out time:</strong>
+                ${new Date(updatedVisitor.checkOutTime).toLocaleString(
+                  "en-IN",
+                  { timeZone: "Asia/Kolkata" }
+                )}
+              </p>
+              <p>Thank you for visiting us!</p>
+              <p>Regards,<br/>VisitPro Team</p>
+            </div>
+          `,
+        });
+
+        console.log("Visitor check-out email sent!");
+      } catch (emailError) {
+        console.error(
+          "Check-out email failed:",
+          emailError.message
+        );
+      }
+    }
+
     return res.status(200).json({
       success: true,
       message: "Visitor checked out successfully.",
       visitor: updatedVisitor,
     });
+
   } catch (error) {
     next(error);
   }
 };
+
 
 module.exports = {
   approveVisitor,
