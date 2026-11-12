@@ -204,8 +204,26 @@ emitVisitorUpdate({
           emailError.message
         );
       }
+   
+    // Send registration email in background
+    if (visitor.email) {
+      sendEmail({
+        to: visitor.email,
+        subject: `Visitor Registration Received - ${visitor.visitorId}`,
+        html: registrationEmail(visitor),
+      })
+        .then(() => {
+          console.log("Registration email sent successfully!");
+        })
+        .catch((emailError) => {
+          console.error(
+            "Registration email failed:",
+            emailError.message
+          );
+        });
     }
 
+    // Return response immediately
     return res.status(201).json({
       success: true,
       message: "Visitor registered successfully.",
@@ -215,6 +233,8 @@ emitVisitorUpdate({
         qrCode,
       },
     });
+
+   
 
   } catch (error) {
     next(error);
