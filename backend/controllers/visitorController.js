@@ -27,15 +27,17 @@ const normalizePhone = (phone) => {
 // ===============================
 
 
+
 const registerVisitor = async (req, res, next) => {
   try {
     const settings = await Setting.findOne();
 
-const visitorSettings = {
-  requireApproval: settings?.requireApproval ?? true,
-  allowWalkInVisitors: settings?.allowWalkInVisitors ?? true,
-  allowMultipleVisits: settings?.allowMultipleVisits ?? true,
-};
+    const visitorSettings = {
+      requireApproval: settings?.requireApproval ?? true,
+      allowWalkInVisitors: settings?.allowWalkInVisitors ?? true,
+      allowMultipleVisits: settings?.allowMultipleVisits ?? true,
+    };
+
     const {
       name,
       phone,
@@ -48,57 +50,66 @@ const visitorSettings = {
     } = req.body;
 
     // Validate required fields
- if (!name || !phone || !purpose || !host) {
+    if (!name || !phone || !purpose || !host) {
       return res.status(400).json({
         success: false,
         message: "Please provide all required visitor details.",
       });
     }
-if (!appointmentDate && !visitorSettings.allowWalkInVisitors) {
-  return res.status(400).json({
-    success: false,
-    message: "Walk-in visitors are not allowed.",
-  });
-}
+
+    if (!appointmentDate && !visitorSettings.allowWalkInVisitors) {
+      return res.status(400).json({
+        success: false,
+        message: "Walk-in visitors are not allowed.",
+      });
+    }
+
     const normalizedPhone = normalizePhone(phone);
 
-    if (normalizedPhone.length < 10 || normalizedPhone.length > 15) {
+    if (
+      normalizedPhone.length < 10 ||
+      normalizedPhone.length > 15
+    ) {
       return res.status(400).json({
         success: false,
         message: "Please enter a valid phone number.",
       });
     }
-// Check repeat visitor restriction
-if (!visitorSettings.allowMultipleVisits) {
-  const existingVisitor = await Visitor.findOne({
-    phone: normalizedPhone,
-    visitStatus: { $ne: "cancelled" },
-  });
 
-  if (existingVisitor) {
-    return res.status(409).json({
-      success: false,
-      message: "Multiple visits are not allowed for this visitor.",
+    // Check multiple visit restriction
+    if (!visitorSettings.allowMultipleVisits) {
+      const existingVisitor = await Visitor.findOne({
+        phone: normalizedPhone,
+        visitStatus: { $ne: "cancelled" },
+      });
+
+      if (existingVisitor) {
+        return res.status(409).json({
+          success: false,
+          message: "Multiple visits are not allowed for this visitor.",
+        });
+      }
+    }
+
+    // Validate appointment date
+    let visitDate = null;
+
+    if (appointmentDate) {
+      visitDate = new Date(appointmentDate);
+
+      if (Number.isNaN(visitDate.getTime())) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid appointment date.",
+        });
+      }
+    }
+
+    // Check blacklist
+    const isBlacklisted = await Blacklist.exists({
+      phone: normalizedPhone,
+      status: "blocked",
     });
-  }
-}
- let visitDate = null;
-
-if (appointmentDate) {
-  visitDate = new Date(appointmentDate);
-
-  if (Number.isNaN(visitDate.getTime())) {
-    return res.status(400).json({
-      success: false,
-      message: "Invalid appointment date.",
-    });
-  }
-}
- // Check blacklist directly in MongoDB
-const isBlacklisted = await Blacklist.exists({
-  phone: normalizedPhone,
-  status: "blocked",
-});
 
     if (isBlacklisted) {
       return res.status(403).json({
@@ -122,7 +133,7 @@ const isBlacklisted = await Blacklist.exists({
       });
     }
 
-    // Create visitor
+    // STEP 1: Save visitor in database
     const visitor = await Visitor.create({
       name: name.trim(),
       phone: normalizedPhone,
@@ -134,78 +145,113 @@ const isBlacklisted = await Blacklist.exists({
       notes: notes || "",
       photo: req.file ? `/uploads/${req.file.filename}` : "",
       registeredBy: req.user._id,
- approvalStatus: visitorSettings.requireApproval ? "pending" : "approved",
-approvedBy: visitorSettings.requireApproval ? null : req.user._id,
-approvedAt: visitorSettings.requireApproval ? null : new Date(),
+      approvalStatus: visitorSettings.requireApproval
+        ? "pending"
+        : "approved",
+      approvedBy: visitorSettings.requireApproval
+        ? null
+        : req.user._id,
+      approvedAt: visitorSettings.requireApproval
+        ? null
+        : new Date(),
       visitStatus: "registered",
       idType: req.body.idType || "none",
-idNumber: req.body.idNumber || "",
+      idNumber: req.body.idNumber || "",
     });
 
-    // Generate QR code using private pass token
-    const qrCode = await QRCode.toDataURL(visitor.passToken);
+    console.log("Visitor saved successfully:", visitor.visitorId);
 
+    // STEP 2: Generate QR code (best effort)
+    let qrCode = null;
 
-    // Notify host employee
-    await createNotification({
-      recipient: hostUser._id,
-      title: "New Visitor Registration",
-      message: `${visitor.name} has registered to visit you.`,
-      type: "approval_request",
-      visitor: visitor._id,
-      actionUrl: `/visitors/${visitor._id}`,
-    });
-
-    // Notify active admins and receptionists
-    await notifyByRole({
-      roles: ["admin", "receptionist"],
-      title: "New Visitor Registered",
-      message: `${visitor.name} registered for ${hostUser.name}. Approval is pending.`,
-      type: "visitor_registration",
-      visitor: visitor._id,
-      actionUrl: `/visitors/${visitor._id}`,
-      excludeUserId: req.user._id,
-    });
-
-// ===============================
-// REAL-TIME DASHBOARD UPDATE
-// ===============================
-emitVisitorUpdate({
-  action: "visitor_registered",
-  visitorId: visitor._id,
-  visitorName: visitor.name,
-  timestamp: new Date(),
-});
-    // Activity log
-    await logActivity({
-      req,
-      action: "VISITOR_REGISTERED",
-      description: `${visitor.name} was registered successfully.`,
-      visitor: visitor._id,
-      metadata: {
-        visitorId: visitor.visitorId,
-        host: hostUser.name,
-      },
-    });
-
-    // Send ONE registration email
-    if (visitor.email) {
-      try {
-        await sendEmail({
-          to: visitor.email,
-          subject: `Visitor Registration Received - ${visitor.visitorId}`,
-          html: registrationEmail(visitor),
-        });
-
-        console.log("Registration email sent successfully!");
-      } catch (emailError) {
-        console.error(
-          "Registration email failed:",
-          emailError.message
-        );
-      }
+    try {
+      qrCode = await QRCode.toDataURL(visitor.passToken);
+    } catch (qrError) {
+      console.error("QR generation failed:", qrError.message);
     }
 
+    // STEP 3: Send host notification in background
+    Promise.resolve()
+      .then(() =>
+        createNotification({
+          recipient: hostUser._id,
+          title: "New Visitor Registration",
+          message: `${visitor.name} has registered to visit you.`,
+          type: "approval_request",
+          visitor: visitor._id,
+          actionUrl: `/visitors/${visitor._id}`,
+        })
+      )
+      .catch((error) => {
+        console.error("Host notification failed:", error.message);
+      });
+
+    // STEP 4: Notify admins and receptionists in background
+    Promise.resolve()
+      .then(() =>
+        notifyByRole({
+          roles: ["admin", "receptionist"],
+          title: "New Visitor Registered",
+          message: `${visitor.name} registered for ${hostUser.name}. Approval is pending.`,
+          type: "visitor_registration",
+          visitor: visitor._id,
+          actionUrl: `/visitors/${visitor._id}`,
+          excludeUserId: req.user._id,
+        })
+      )
+      .catch((error) => {
+        console.error("Admin notification failed:", error.message);
+      });
+
+    // STEP 5: Real-time dashboard update
+    try {
+      emitVisitorUpdate({
+        action: "visitor_registered",
+        visitorId: visitor._id,
+        visitorName: visitor.name,
+        timestamp: new Date(),
+      });
+    } catch (socketError) {
+      console.error("Socket update failed:", socketError.message);
+    }
+
+    // STEP 6: Activity logging in background
+    Promise.resolve()
+      .then(() =>
+        logActivity({
+          req,
+          action: "VISITOR_REGISTERED",
+          description: `${visitor.name} was registered successfully.`,
+          visitor: visitor._id,
+          metadata: {
+            visitorId: visitor.visitorId,
+            host: hostUser.name,
+          },
+        })
+      )
+      .catch((error) => {
+        console.error("Activity logging failed:", error.message);
+      });
+
+    // STEP 7: Send registration email in background
+    if (visitor.email) {
+      Promise.resolve()
+        .then(() =>
+          sendEmail({
+            to: visitor.email,
+            subject: `Visitor Registration Received - ${visitor.visitorId}`,
+            html: registrationEmail(visitor),
+          })
+        )
+        .then(() => {
+          console.log("Registration email sent successfully!");
+        })
+        .catch((error) => {
+          console.error("Registration email failed:", error.message);
+        });
+    }
+
+    // STEP 8: Return success immediately
     return res.status(201).json({
       success: true,
       message: "Visitor registered successfully.",
@@ -217,9 +263,11 @@ emitVisitorUpdate({
     });
 
   } catch (error) {
+    console.error("Visitor registration error:", error);
     next(error);
   }
 };
+
 
 
 // ===============================
