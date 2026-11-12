@@ -57,6 +57,7 @@ const approveVisitor = async (req, res, next) => {
       });
     }
 
+    // STEP 1: Update approval in database
     visitor.approvalStatus = "approved";
     visitor.approvedBy = req.user._id;
     visitor.approvedAt = new Date();
@@ -64,83 +65,92 @@ const approveVisitor = async (req, res, next) => {
 
     await visitor.save();
 
-   
-    // Notify the user who registered the visitor
-    await createNotification({
-      recipient: visitor.registeredBy,
-      title: "Visitor Approved",
-      message: `${visitor.name}'s visit has been approved.`,
-      type: "approval_approved",
-      visitor: visitor._id,
-      actionUrl: `/visitors/${visitor._id}`,
-    });
+    console.log("Visitor approved successfully:", visitor.visitorId);
 
+    // STEP 2: Notification in background
+    Promise.resolve()
+      .then(() =>
+        createNotification({
+          recipient: visitor.registeredBy,
+          title: "Visitor Approved",
+          message: `${visitor.name}'s visit has been approved.`,
+          type: "approval_approved",
+          visitor: visitor._id,
+          actionUrl: `/visitors/${visitor._id}`,
+        })
+      )
+      .catch((error) => {
+        console.error("Approval notification failed:", error.message);
+      });
 
-    // Activity log
-    await logActivity({
-      req,
-      action: "VISITOR_APPROVED",
-      description: `${visitor.name}'s visit was approved.`,
-      visitor: visitor._id,
-    });
+    // STEP 3: Activity log in background
+    Promise.resolve()
+      .then(() =>
+        logActivity({
+          req,
+          action: "VISITOR_APPROVED",
+          description: `${visitor.name}'s visit was approved.`,
+          visitor: visitor._id,
+        })
+      )
+      .catch((error) => {
+        console.error("Approval activity log failed:", error.message);
+      });
 
-    // Generate QR PNG from existing private token
+    // STEP 4: Approval email and QR in background
     if (visitor.email) {
-      try {
-        const qrBuffer = await QRCode.toBuffer(
-          visitor.passToken,
-          {
-            type: "png",
-            width: 300,
-            margin: 2,
-          }
-        );
-
-        const qrSection = `
-          <div style="text-align:center;padding:20px;">
-            <h3>Your Digital Visitor Pass</h3>
-            <p>Show this QR code at reception.</p>
-
-            <img
-              src="cid:visitor-qr"
-              alt="Visitor QR Pass"
-              width="220"
-              height="220"
-            />
-
-            <p><strong>${visitor.visitorId}</strong></p>
-          </div>
-        `;
-
-        const html = approvalEmail(visitor).replace(
-          "</body>",
-          `${qrSection}</body>`
-        );
-
-        await sendEmail({
-          to: visitor.email,
-          subject: `Visit Approved - ${visitor.visitorId}`,
-          html,
-          attachments: [
+      Promise.resolve()
+        .then(async () => {
+          const qrBuffer = await QRCode.toBuffer(
+            visitor.passToken,
             {
-              filename: `VisitPro-${visitor.visitorId}.png`,
-              content: qrBuffer,
-              contentType: "image/png",
-              cid: "visitor-qr",
-            },
-          ],
+              type: "png",
+              width: 300,
+              margin: 2,
+            }
+          );
+
+          const qrSection = `
+            <div style="text-align:center;padding:20px;">
+              <h3>Your Digital Visitor Pass</h3>
+              <p>Show this QR code at reception.</p>
+              <img
+                src="cid:visitor-qr"
+                alt="Visitor QR Pass"
+                width="220"
+                height="220"
+              />
+              <p><strong>${visitor.visitorId}</strong></p>
+            </div>
+          `;
+
+          const html = approvalEmail(visitor).replace(
+            "</body>",
+            `${qrSection}</body>`
+          );
+
+          await sendEmail({
+            to: visitor.email,
+            subject: `Visit Approved - ${visitor.visitorId}`,
+            html,
+            attachments: [
+              {
+                filename: `VisitPro-${visitor.visitorId}.png`,
+                content: qrBuffer,
+                contentType: "image/png",
+                cid: "visitor-qr",
+              },
+            ],
+          });
+
+          console.log("Approval email with QR pass sent!");
+        })
+        .catch((error) => {
+          console.error("Approval QR email failed:", error.message);
         });
-
-        console.log("Approval email with QR pass sent!");
-
-      } catch (emailError) {
-        console.error(
-          "Approval QR email failed:",
-          emailError.message
-        );
-      }
     }
 
+    // STEP 5: Return success immediately
     return res.status(200).json({
       success: true,
       message: "Visitor approved successfully.",
@@ -148,6 +158,7 @@ const approveVisitor = async (req, res, next) => {
     });
 
   } catch (error) {
+    console.error("Approve visitor error:", error);
     next(error);
   }
 };
