@@ -2,43 +2,40 @@
 const Visitor = require("../models/Visitor");
 const User = require("../models/User");
 const Blacklist = require("../models/Blacklist");
+const Notification = require("../models/Notification");
 const QRCode = require("qrcode");
-
 const createNotification = require("../utils/createNotification");
 const notifyByRole = require("../utils/notifyByRole");
 const Setting = require("../models/Setting");
 const sendEmail = require("../services/emailService");
 const { emitVisitorUpdate } = require("../utils/socket");
-
 const {
   registrationEmail,
+  approvalEmail,
+  rejectionEmail,
 } = require("../templates/emailTemplates");
 
 const logActivity = require("../utils/activityLogger");
 
-// =====================================
-// NORMALIZE PHONE NUMBER
-// =====================================
-
+// Normalize phone number for consistent blacklist checking
 const normalizePhone = (phone) => {
   return String(phone || "").replace(/\D/g, "");
 };
 
-// =====================================
+// ===============================
 // REGISTER VISITOR
-// =====================================
+// ===============================
+
 
 const registerVisitor = async (req, res, next) => {
   try {
-    // Get visitor settings
     const settings = await Setting.findOne();
 
-    const visitorSettings = {
-      requireApproval: settings?.requireApproval ?? true,
-      allowWalkInVisitors: settings?.allowWalkInVisitors ?? true,
-      allowMultipleVisits: settings?.allowMultipleVisits ?? true,
-    };
-
+const visitorSettings = {
+  requireApproval: settings?.requireApproval ?? true,
+  allowWalkInVisitors: settings?.allowWalkInVisitors ?? true,
+  allowMultipleVisits: settings?.allowMultipleVisits ?? true,
+};
     const {
       name,
       phone,
@@ -51,68 +48,57 @@ const registerVisitor = async (req, res, next) => {
     } = req.body;
 
     // Validate required fields
-    if (!name || !phone || !purpose || !host) {
+ if (!name || !phone || !purpose || !host) {
       return res.status(400).json({
         success: false,
         message: "Please provide all required visitor details.",
       });
     }
-
-    // Validate walk-in visitors
-    if (!appointmentDate && !visitorSettings.allowWalkInVisitors) {
-      return res.status(400).json({
-        success: false,
-        message: "Walk-in visitors are not allowed.",
-      });
-    }
-
-    // Normalize phone
+if (!appointmentDate && !visitorSettings.allowWalkInVisitors) {
+  return res.status(400).json({
+    success: false,
+    message: "Walk-in visitors are not allowed.",
+  });
+}
     const normalizedPhone = normalizePhone(phone);
 
-    if (
-      normalizedPhone.length < 10 ||
-      normalizedPhone.length > 15
-    ) {
+    if (normalizedPhone.length < 10 || normalizedPhone.length > 15) {
       return res.status(400).json({
         success: false,
         message: "Please enter a valid phone number.",
       });
     }
+// Check repeat visitor restriction
+if (!visitorSettings.allowMultipleVisits) {
+  const existingVisitor = await Visitor.findOne({
+    phone: normalizedPhone,
+    visitStatus: { $ne: "cancelled" },
+  });
 
-    // Check repeat visitor restriction
-    if (!visitorSettings.allowMultipleVisits) {
-      const existingVisitor = await Visitor.findOne({
-        phone: normalizedPhone,
-        visitStatus: { $ne: "cancelled" },
-      });
-
-      if (existingVisitor) {
-        return res.status(409).json({
-          success: false,
-          message: "Multiple visits are not allowed for this visitor.",
-        });
-      }
-    }
-
-    // Validate appointment date
-    let visitDate = null;
-
-    if (appointmentDate) {
-      visitDate = new Date(appointmentDate);
-
-      if (Number.isNaN(visitDate.getTime())) {
-        return res.status(400).json({
-          success: false,
-          message: "Invalid appointment date.",
-        });
-      }
-    }
-
-    // Check blacklist
-    const isBlacklisted = await Blacklist.exists({
-      phone: normalizedPhone,
-      status: "blocked",
+  if (existingVisitor) {
+    return res.status(409).json({
+      success: false,
+      message: "Multiple visits are not allowed for this visitor.",
     });
+  }
+}
+ let visitDate = null;
+
+if (appointmentDate) {
+  visitDate = new Date(appointmentDate);
+
+  if (Number.isNaN(visitDate.getTime())) {
+    return res.status(400).json({
+      success: false,
+      message: "Invalid appointment date.",
+    });
+  }
+}
+ // Check blacklist directly in MongoDB
+const isBlacklisted = await Blacklist.exists({
+  phone: normalizedPhone,
+  status: "blocked",
+});
 
     if (isBlacklisted) {
       return res.status(403).json({
@@ -122,7 +108,7 @@ const registerVisitor = async (req, res, next) => {
       });
     }
 
-    // Validate host employee
+    // Validate host
     const hostUser = await User.findOne({
       _id: host,
       role: "employee",
@@ -148,27 +134,17 @@ const registerVisitor = async (req, res, next) => {
       notes: notes || "",
       photo: req.file ? `/uploads/${req.file.filename}` : "",
       registeredBy: req.user._id,
-
-      approvalStatus: visitorSettings.requireApproval
-        ? "pending"
-        : "approved",
-
-      approvedBy: visitorSettings.requireApproval
-        ? null
-        : req.user._id,
-
-      approvedAt: visitorSettings.requireApproval
-        ? null
-        : new Date(),
-
+ approvalStatus: visitorSettings.requireApproval ? "pending" : "approved",
+approvedBy: visitorSettings.requireApproval ? null : req.user._id,
+approvedAt: visitorSettings.requireApproval ? null : new Date(),
       visitStatus: "registered",
-
       idType: req.body.idType || "none",
-      idNumber: req.body.idNumber || "",
+idNumber: req.body.idNumber || "",
     });
 
-    // Generate QR code
+    // Generate QR code using private pass token
     const qrCode = await QRCode.toDataURL(visitor.passToken);
+
 
     // Notify host employee
     await createNotification({
@@ -180,7 +156,7 @@ const registerVisitor = async (req, res, next) => {
       actionUrl: `/visitors/${visitor._id}`,
     });
 
-    // Notify admins and receptionists
+    // Notify active admins and receptionists
     await notifyByRole({
       roles: ["admin", "receptionist"],
       title: "New Visitor Registered",
@@ -191,14 +167,15 @@ const registerVisitor = async (req, res, next) => {
       excludeUserId: req.user._id,
     });
 
-    // Real-time dashboard update
-    emitVisitorUpdate({
-      action: "visitor_registered",
-      visitorId: visitor._id,
-      visitorName: visitor.name,
-      timestamp: new Date(),
-    });
-
+// ===============================
+// REAL-TIME DASHBOARD UPDATE
+// ===============================
+emitVisitorUpdate({
+  action: "visitor_registered",
+  visitorId: visitor._id,
+  visitorName: visitor.name,
+  timestamp: new Date(),
+});
     // Activity log
     await logActivity({
       req,
@@ -211,28 +188,24 @@ const registerVisitor = async (req, res, next) => {
       },
     });
 
-    // Send registration email in background
+    // Send ONE registration email
     if (visitor.email) {
-      Promise.resolve()
-        .then(() =>
-          sendEmail({
-            to: visitor.email,
-            subject: `Visitor Registration Received - ${visitor.visitorId}`,
-            html: registrationEmail(visitor),
-          })
-        )
-        .then(() => {
-          console.log("Registration email sent successfully!");
-        })
-        .catch((emailError) => {
-          console.error(
-            "Registration email failed:",
-            emailError.message
-          );
+      try {
+        await sendEmail({
+          to: visitor.email,
+          subject: `Visitor Registration Received - ${visitor.visitorId}`,
+          html: registrationEmail(visitor),
         });
+
+        console.log("Registration email sent successfully!");
+      } catch (emailError) {
+        console.error(
+          "Registration email failed:",
+          emailError.message
+        );
+      }
     }
 
-    // Return response immediately
     return res.status(201).json({
       success: true,
       message: "Visitor registered successfully.",
@@ -248,10 +221,10 @@ const registerVisitor = async (req, res, next) => {
   }
 };
 
-// =====================================
-// GET ALL VISITORS
-// =====================================
 
+// ===============================
+// GET ALL VISITORS
+// ===============================
 const getVisitors = async (req, res, next) => {
   try {
     const {
@@ -277,7 +250,6 @@ const getVisitors = async (req, res, next) => {
       filter.host = req.user._id;
     }
 
-    // Search visitors
     if (search) {
       const searchRegex = new RegExp(
         search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
@@ -293,10 +265,7 @@ const getVisitors = async (req, res, next) => {
     }
 
     const currentPage = Math.max(1, Number(page) || 1);
-    const pageLimit = Math.min(
-      100,
-      Math.max(1, Number(limit) || 10)
-    );
+    const pageLimit = Math.min(100, Math.max(1, Number(limit) || 10));
 
     const total = await Visitor.countDocuments(filter);
 
@@ -315,16 +284,14 @@ const getVisitors = async (req, res, next) => {
       pages: Math.ceil(total / pageLimit),
       visitors,
     });
-
   } catch (error) {
     next(error);
   }
 };
 
-// =====================================
+// ===============================
 // GET SINGLE VISITOR
-// =====================================
-
+// ===============================
 const getVisitorById = async (req, res, next) => {
   try {
     const visitor = await Visitor.findById(req.params.id)
@@ -340,8 +307,7 @@ const getVisitorById = async (req, res, next) => {
 
     if (
       req.user.role === "employee" &&
-      (!visitor.host ||
-        !visitor.host._id.equals(req.user._id))
+      !visitor.host._id.equals(req.user._id)
     ) {
       return res.status(403).json({
         success: false,
@@ -353,16 +319,14 @@ const getVisitorById = async (req, res, next) => {
       success: true,
       visitor,
     });
-
   } catch (error) {
     next(error);
   }
 };
 
-// =====================================
+// ===============================
 // UPDATE VISITOR
-// =====================================
-
+// ===============================
 const updateVisitor = async (req, res, next) => {
   try {
     const visitor = await Visitor.findById(req.params.id);
@@ -385,7 +349,6 @@ const updateVisitor = async (req, res, next) => {
       notes,
     } = req.body;
 
-    // Validate phone
     if (phone !== undefined) {
       const normalizedPhone = normalizePhone(phone);
 
@@ -418,7 +381,6 @@ const updateVisitor = async (req, res, next) => {
       visitor.phone = normalizedPhone;
     }
 
-    // Validate host
     if (host !== undefined) {
       const hostUser = await User.findOne({
         _id: host,
@@ -436,28 +398,23 @@ const updateVisitor = async (req, res, next) => {
       visitor.host = hostUser._id;
     }
 
-    // Validate appointment date
     if (appointmentDate !== undefined) {
-      if (appointmentDate === null || appointmentDate === "") {
-        visitor.appointmentDate = null;
-      } else {
-        const date = new Date(appointmentDate);
+      const date = new Date(appointmentDate);
 
-        if (Number.isNaN(date.getTime())) {
-          return res.status(400).json({
-            success: false,
-            message: "Invalid appointment date.",
-          });
-        }
-
-        visitor.appointmentDate = date;
+      if (Number.isNaN(date.getTime())) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid appointment date.",
+        });
       }
+
+      visitor.appointmentDate = date;
     }
 
-    if (name !== undefined) visitor.name = name.trim();
+    if (name !== undefined) visitor.name = name;
     if (email !== undefined) visitor.email = email;
     if (company !== undefined) visitor.company = company;
-    if (purpose !== undefined) visitor.purpose = purpose.trim();
+    if (purpose !== undefined) visitor.purpose = purpose;
     if (notes !== undefined) visitor.notes = notes;
 
     if (req.file) {
@@ -478,16 +435,14 @@ const updateVisitor = async (req, res, next) => {
       message: "Visitor updated successfully.",
       visitor,
     });
-
   } catch (error) {
     next(error);
   }
 };
 
-// =====================================
+// ===============================
 // DELETE VISITOR
-// =====================================
-
+// ===============================
 const deleteVisitor = async (req, res, next) => {
   try {
     const visitor = await Visitor.findById(req.params.id);
@@ -522,15 +477,10 @@ const deleteVisitor = async (req, res, next) => {
       success: true,
       message: "Visitor deleted successfully.",
     });
-
   } catch (error) {
     next(error);
   }
 };
-
-// =====================================
-// VERIFY VISITOR ID
-// =====================================
 
 const verifyVisitorId = async (req, res) => {
   try {
@@ -545,11 +495,7 @@ const verifyVisitorId = async (req, res) => {
       });
     }
 
-    if (
-      !visitor.idType ||
-      visitor.idType === "none" ||
-      !visitor.idNumber
-    ) {
+    if (!visitor.idType || visitor.idType === "none" || !visitor.idNumber) {
       return res.status(400).json({
         success: false,
         message: "Visitor ID type and ID number are required.",
@@ -575,7 +521,6 @@ const verifyVisitorId = async (req, res) => {
         idVerifiedAt: visitor.idVerifiedAt,
       },
     });
-
   } catch (error) {
     console.error("Verify visitor ID error:", error);
 
@@ -585,10 +530,6 @@ const verifyVisitorId = async (req, res) => {
     });
   }
 };
-
-// =====================================
-// EXPORT CONTROLLERS
-// =====================================
 
 module.exports = {
   registerVisitor,
